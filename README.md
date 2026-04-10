@@ -50,7 +50,7 @@ To remotely deactivate and wipe the installation:
 If you have physical access and wish to remove the suite immediately, run the provided uninstaller:
 
 ```powershell
-irm [https://raw.githubusercontent.com/09sychic/DevilCamUpdated/main/uninstall.ps1](https://raw.githubusercontent.com/09sychic/DevilCamUpdated/main/uninstall.ps1) | iex
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12; iex (irm "https://raw.githubusercontent.com/09sychic/DevilCamUpdated/main/uninstall.ps1")
 ```
 
 ## ⚠️ Disclaimer

